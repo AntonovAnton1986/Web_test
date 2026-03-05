@@ -43,6 +43,7 @@ class TestProgram:
             st.session_state.test_started = False
             st.session_state.test_finished = False
             st.session_state.answer = None
+            st.session_state.test_completed_early = False  # Флаг досрочного завершения
 
     def check_files_exist(self):
         """Проверка наличия всех файлов"""
@@ -223,6 +224,19 @@ class TestProgram:
             q['options'] = new_options
             q['answer'] = new_correct
 
+    def finish_test_early(self):
+        """Досрочное завершение теста и подсчет результатов"""
+        # Сохраняем текущий ответ, если он есть
+        if st.session_state.answer and st.session_state.current_question < len(st.session_state.questions):
+            self.save_answer(st.session_state.current_question,
+                             st.session_state.questions[st.session_state.current_question])
+
+        # Устанавливаем флаг досрочного завершения
+        st.session_state.test_completed_early = True
+        st.session_state.test_finished = True
+        st.session_state.test_started = False
+        st.session_state.rerun = True
+
     def render_start_page(self):
         """Страница начала теста"""
         st.title("📝 Программа тестирования")
@@ -239,6 +253,7 @@ class TestProgram:
             - Вам будет предложено несколько вопросов
             - Выберите правильный ответ (один или несколько)
             - В конце вы увидите свои результаты
+            - Можно досрочно завершить тест кнопкой **Завершить**
 
             **Форматы вопросов:**
             - ✅ Один правильный ответ
@@ -253,9 +268,13 @@ class TestProgram:
                 if st.button("🚀 Начать тест", type="primary", use_container_width=True):
                     st.session_state.test_started = True
                     st.session_state.test_finished = False
+                    st.session_state.test_completed_early = False
                     st.session_state.current_question = 0
                     st.session_state.score = 0
                     st.session_state.user_answers = []
+                    st.session_state.user_answers_text = []
+                    st.session_state.correct_answers = []
+                    st.session_state.correct_answers_text = []
                     st.session_state.rerun = True
             else:
                 st.error(message)
@@ -283,12 +302,16 @@ class TestProgram:
         original_idx = st.session_state.question_mapping.get(current, current)
         original_num = st.session_state.original_questions[original_idx]['original_index']
 
-        # Заголовок и прогресс
-        col1, col2 = st.columns([3, 1])
-        with col1:
+        # Верхняя панель с кнопкой завершения
+        col_top1, col_top2, col_top3 = st.columns([3, 1, 1])
+        with col_top1:
             st.title(f"📝 Вопрос {current + 1} из {total}")
-        with col2:
+        with col_top2:
             st.metric("Правильных ответов", st.session_state.score)
+        with col_top3:
+            # Кнопка досрочного завершения
+            if st.button("🏁 Завершить", type="secondary", use_container_width=True):
+                self.finish_test_early()
 
         # Прогресс-бар
         progress = (current) / total
@@ -335,26 +358,39 @@ class TestProgram:
         st.markdown("---")
 
         # Кнопки навигации
-        col1, col2, col3 = st.columns([1, 2, 1])
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
 
         with col1:
             if current > 0:
                 if st.button("← Назад", use_container_width=True):
+                    # Сохраняем текущий ответ перед переходом
+                    if st.session_state.answer:
+                        self.save_answer(current, q)
                     st.session_state.current_question -= 1
                     st.session_state.rerun = True
+
+        with col2:
+        # Пустое место для баланса
 
         with col3:
             if current < total - 1:
                 if st.button("Далее →", type="primary", use_container_width=True):
-                    self.save_answer(current, q)
+                    if st.session_state.answer:
+                        self.save_answer(current, q)
                     st.session_state.current_question += 1
                     st.session_state.rerun = True
             else:
                 if st.button("Завершить тест", type="primary", use_container_width=True):
-                    self.save_answer(current, q)
+                    if st.session_state.answer:
+                        self.save_answer(current, q)
                     st.session_state.test_finished = True
                     st.session_state.test_started = False
                     st.session_state.rerun = True
+
+        with col4:
+            # Дублируем кнопку завершения для удобства
+            if st.button("🏁 Завершить сейчас", type="secondary", use_container_width=True):
+                self.finish_test_early()
 
     def save_answer(self, question_idx, q):
         """Сохранение ответа"""
@@ -363,69 +399,127 @@ class TestProgram:
         if not answer:
             return
 
-        # Форматируем ответ
+        # Проверяем, не был ли уже сохранен ответ на этот вопрос
+        # (чтобы избежать дублирования при возврате к вопросу)
+        if question_idx < len(st.session_state.user_answers):
+            # Если ответ уже был, обновляем его
+            st.session_state.user_answers[question_idx] = self.format_answer_for_save(answer, q)
+            st.session_state.user_answers_text[question_idx] = self.format_answer_for_display(answer, q)
+
+            # Пересчитываем общий счет
+            self.recalculate_score()
+        else:
+            # Если ответа еще не было, добавляем новый
+            answer_str = self.format_answer_for_save(answer, q)
+            answer_text = self.format_answer_for_display(answer, q)
+
+            st.session_state.user_answers.append(answer_str)
+            st.session_state.user_answers_text.append(answer_text)
+
+            correct_str = ','.join(sorted(q['answer']))
+
+            # Получаем текст правильных ответов
+            correct_texts = []
+            for c in q['answer']:
+                idx = ord(c) - ord('A')
+                if 0 <= idx < len(q['options']):
+                    correct_texts.append(q['options'][idx])
+
+            # Добавляем правильные ответы в соответствующие списки
+            while len(st.session_state.correct_answers) <= question_idx:
+                st.session_state.correct_answers.append('')
+                st.session_state.correct_answers_text.append('')
+
+            st.session_state.correct_answers[question_idx] = correct_str
+            st.session_state.correct_answers_text[question_idx] = '; '.join(correct_texts)
+
+            # Проверяем правильность и обновляем счет
+            if self.check_answer_correctness(answer, q):
+                st.session_state.score += 1
+
+    def format_answer_for_save(self, answer, q):
+        """Форматирует ответ для сохранения"""
         if q.get('multiple', False):
-            # Множественный выбор
             answer_letters = []
-            answer_texts = []
             for a in answer:
                 idx = q['options'].index(a)
-                letter = chr(ord('A') + idx)
-                answer_letters.append(letter)
-                answer_texts.append(a)
-
-            answer_str = ','.join(sorted(answer_letters))
-            answer_text = '; '.join(answer_texts)
+                answer_letters.append(chr(ord('A') + idx))
+            return ','.join(sorted(answer_letters))
         else:
-            # Одиночный выбор
             if answer:
                 idx = q['options'].index(answer)
-                answer_str = chr(ord('A') + idx)
-                answer_text = answer
-            else:
-                return
+                return chr(ord('A') + idx)
+            return ''
 
-        # Сохраняем
-        st.session_state.user_answers.append(answer_str)
-        st.session_state.user_answers_text.append(answer_text)
-
-        correct_str = ','.join(sorted(q['answer']))
-
-        # Получаем текст правильных ответов
-        correct_texts = []
-        for c in q['answer']:
-            idx = ord(c) - ord('A')
-            if 0 <= idx < len(q['options']):
-                correct_texts.append(q['options'][idx])
-
-        st.session_state.correct_answers.append(correct_str)
-        st.session_state.correct_answers_text.append('; '.join(correct_texts))
-
-        # Проверяем правильность
+    def format_answer_for_display(self, answer, q):
+        """Форматирует ответ для отображения"""
         if q.get('multiple', False):
-            is_correct = set(answer_letters) == set(q['answer'])
+            return '; '.join(answer)
         else:
-            is_correct = answer_str in q['answer']
+            return answer if answer else ''
 
-        if is_correct:
-            st.session_state.score += 1
+    def check_answer_correctness(self, answer, q):
+        """Проверяет правильность ответа"""
+        if not answer:
+            return False
+
+        if q.get('multiple', False):
+            answer_letters = []
+            for a in answer:
+                idx = q['options'].index(a)
+                answer_letters.append(chr(ord('A') + idx))
+            return set(answer_letters) == set(q['answer'])
+        else:
+            if answer:
+                idx = q['options'].index(answer)
+                return chr(ord('A') + idx) in q['answer']
+            return False
+
+    def recalculate_score(self):
+        """Пересчитывает общий счет на основе всех сохраненных ответов"""
+        st.session_state.score = 0
+        for i in range(len(st.session_state.user_answers)):
+            if i < len(st.session_state.questions):
+                q = st.session_state.questions[i]
+                if i < len(st.session_state.user_answers):
+                    answer_str = st.session_state.user_answers[i]
+                    if answer_str:
+                        if q.get('multiple', False):
+                            if set(answer_str.split(',')) == set(q['answer']):
+                                st.session_state.score += 1
+                        else:
+                            if answer_str in q['answer']:
+                                st.session_state.score += 1
 
     def render_results_page(self):
         """Страница с результатами"""
         st.title("📊 Результаты теста")
+
+        # Информация о досрочном завершении
+        if st.session_state.get('test_completed_early', False):
+            st.info("🏁 Тест завершен досрочно")
+
         st.markdown("---")
 
         total = len(st.session_state.questions)
+        answered = len(st.session_state.user_answers)
         score = st.session_state.score
-        percent = (score / total) * 100
+        percent = (score / total) * 100 if total > 0 else 0
 
         # Основная статистика
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Правильных ответов", f"{score}/{total}")
+            st.metric("Всего вопросов", total)
         with col2:
-            st.metric("Процент", f"{percent:.1f}%")
+            st.metric("Отвечено", answered)
         with col3:
+            st.metric("Правильных", f"{score}/{total}")
+        with col4:
+            st.metric("Процент", f"{percent:.1f}%")
+
+        # Оценка
+        col1, col2, col3 = st.columns(3)
+        with col2:
             if percent >= 90:
                 grade = "5 (Отлично)"
                 grade_color = "green"
@@ -439,30 +533,56 @@ class TestProgram:
                 grade = "2 (Нужно повторить)"
                 grade_color = "red"
 
-            st.markdown(f"### :{grade_color}[{grade}]")
+            st.markdown(f"## :{grade_color}[{grade}]")
 
         st.markdown("---")
 
-        # Детальный разбор ошибок
-        if score < total:
-            st.markdown("### ❌ Вопросы с ошибками")
+        # Детальный разбор ответов
+        if answered > 0:
+            st.markdown("### 📋 Детализация ответов")
 
-            mistakes_found = False
-            for i in range(len(st.session_state.user_answers)):
-                if st.session_state.user_answers[i] != st.session_state.correct_answers[i]:
-                    mistakes_found = True
-                    original_idx = st.session_state.question_mapping.get(i, i)
-                    original_num = st.session_state.original_questions[original_idx]['original_index']
+            # Создаем DataFrame для удобного отображения
+            results_data = []
+            for i in range(total):
+                original_idx = st.session_state.question_mapping.get(i, i)
+                original_num = st.session_state.original_questions[original_idx]['original_index']
 
-                    with st.expander(f"Вопрос {i + 1} (оригинал №{original_num})"):
-                        st.markdown(f"**{st.session_state.questions[i]['question']}**")
-                        st.markdown(f"❌ **Ваш ответ:** {st.session_state.user_answers_text[i]}")
-                        st.markdown(f"✅ **Правильный ответ:** {st.session_state.correct_answers_text[i]}")
+                if i < len(st.session_state.user_answers) and st.session_state.user_answers[i]:
+                    user_answer = st.session_state.user_answers_text[i]
+                    correct_answer = st.session_state.correct_answers_text[i]
+                    is_correct = (st.session_state.user_answers[i] == st.session_state.correct_answers[i])
+                else:
+                    user_answer = "❌ Не отвечен"
+                    correct_answer = st.session_state.correct_answers_text[i] if i < len(
+                        st.session_state.correct_answers_text) else "Неизвестно"
+                    is_correct = False
 
-            if not mistakes_found:
+                results_data.append({
+                    "№": i + 1,
+                    "Оригинал №": original_num,
+                    "Вопрос": st.session_state.questions[i]['question'][:50] + "...",
+                    "Ваш ответ": user_answer,
+                    "Правильный ответ": correct_answer,
+                    "Результат": "✅" if is_correct else "❌"
+                })
+
+            df = pd.DataFrame(results_data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+            # Вопросы с ошибками
+            mistakes = [r for r in results_data if r["Результат"] == "❌"]
+            if mistakes:
+                st.markdown("### ❌ Вопросы с ошибками")
+                for mistake in mistakes:
+                    with st.expander(f"Вопрос {mistake['№']} (оригинал №{mistake['Оригинал №']})"):
+                        full_question = st.session_state.questions[mistake['№'] - 1]['question']
+                        st.markdown(f"**{full_question}**")
+                        st.markdown(f"❌ **Ваш ответ:** {mistake['Ваш ответ']}")
+                        st.markdown(f"✅ **Правильный ответ:** {mistake['Правильный ответ']}")
+            else:
                 st.success("🎉 Поздравляем! Все ответы правильные!")
         else:
-            st.success("🎉 Поздравляем! Все ответы правильные!")
+            st.warning("Вы не ответили ни на один вопрос")
 
         st.markdown("---")
 
@@ -473,6 +593,7 @@ class TestProgram:
                 # Сброс состояния
                 st.session_state.test_started = True
                 st.session_state.test_finished = False
+                st.session_state.test_completed_early = False
                 st.session_state.current_question = 0
                 st.session_state.score = 0
                 st.session_state.user_answers = []
