@@ -370,7 +370,8 @@ class TestProgram:
                     st.session_state.rerun = True
 
         with col2:
-        # Пустое место для баланса
+            # Пустое место для баланса
+            st.empty()
 
         with col3:
             if current < total - 1:
