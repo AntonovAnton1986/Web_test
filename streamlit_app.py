@@ -5,6 +5,8 @@ import random
 import sys
 from PIL import Image
 import pandas as pd
+import base64
+from io import BytesIO
 
 # Настройка страницы
 st.set_page_config(
@@ -43,7 +45,9 @@ class TestProgram:
             st.session_state.test_started = False
             st.session_state.test_finished = False
             st.session_state.answer = None
-            st.session_state.test_completed_early = False  # Флаг досрочного завершения
+            st.session_state.test_completed_early = False
+            # Кэш для картинок
+            st.session_state.image_cache = {}
 
     def check_files_exist(self):
         """Проверка наличия всех файлов"""
@@ -57,6 +61,66 @@ class TestProgram:
             missing_files.append("правильные ответы.txt")
 
         return missing_files
+
+    def get_image_for_question(self, original_index, part=None):
+        """Получить картинку для вопроса"""
+        image_path = None
+
+        if part is not None:
+            base_name = f"{original_index}-{part}"
+        else:
+            base_name = str(original_index)
+
+        # Проверяем различные возможные имена файлов
+        possible_names = [
+            f"{base_name}.png",
+            f"{base_name}.jpg",
+            f"{base_name}.jpeg",
+            f"{base_name}.gif",
+            f"вопрос_{base_name}.png",
+            f"вопрос_{base_name}.jpg",
+            f"img_{base_name}.png",
+            f"image_{base_name}.jpg"
+        ]
+
+        # Проверяем в папке с картинками
+        if os.path.exists(self.images_folder):
+            for name in possible_names:
+                test_path = os.path.join(self.images_folder, name)
+                if os.path.exists(test_path):
+                    image_path = test_path
+                    break
+
+        return image_path
+
+    def load_and_display_image(self, image_path, caption=None, max_width=400, max_height=300):
+        """Загружает и отображает изображение в Streamlit"""
+        try:
+            # Проверяем кэш
+            cache_key = f"{image_path}_{max_width}_{max_height}"
+            if cache_key in st.session_state.image_cache:
+                return st.session_state.image_cache[cache_key]
+
+            # Загружаем изображение
+            if os.path.exists(image_path):
+                image = Image.open(image_path)
+
+                # Изменяем размер при необходимости
+                width, height = image.size
+                if width > max_width or height > max_height:
+                    ratio = min(max_width / width, max_height / height)
+                    new_width = int(width * ratio)
+                    new_height = int(height * ratio)
+                    image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                # Сохраняем в кэш
+                st.session_state.image_cache[cache_key] = image
+                return image
+            else:
+                return None
+        except Exception as e:
+            st.warning(f"Не удалось загрузить изображение: {str(e)}")
+            return None
 
     def load_all_files(self):
         """Загрузка всех файлов"""
@@ -89,7 +153,7 @@ class TestProgram:
             return False, f"❌ Ошибка загрузки: {str(e)}"
 
     def parse_files(self, questions_lines, answers_lines, correct_lines):
-        """Парсинг файлов"""
+        """Парсинг файлов с поддержкой картинок"""
         questions = []
 
         # Парсим вопросы
@@ -160,16 +224,46 @@ class TestProgram:
 
             answer_options = answer_groups[i] if i < len(answer_groups) else []
 
-            # Проверяем наличие картинок (упрощенно)
-            has_image = False
-            image_path = None
+            # Определяем тип вопроса с картинками
+            image_as_question = False
+            image_as_answer = False
+            question_images = []
+            answer_images = []
+
+            # Специальные вопросы с картинками
+            if original_num == 144:
+                image_as_question = True
+                for part in [1, 2]:
+                    img_path = self.get_image_for_question(original_num, part)
+                    if img_path:
+                        question_images.append({
+                            'path': img_path,
+                            'part': part
+                        })
+
+            elif original_num == 129:
+                image_as_answer = True
+                for part in [1, 2, 3]:
+                    img_path = self.get_image_for_question(original_num, part)
+                    if img_path:
+                        answer_images.append({
+                            'path': img_path,
+                            'part': part,
+                            'text': f"Вариант {part}"
+                        })
 
             # Формируем варианты ответов
-            for j, ans_text in enumerate(answer_options):
-                option_letter = chr(ord('А') + j)
-                options.append(f"{option_letter}. {ans_text}")
+            if not image_as_answer:
+                for j, ans_text in enumerate(answer_options):
+                    option_letter = chr(ord('А') + j)
+                    options.append(f"{option_letter}. {ans_text}")
+            else:
+                options = answer_images
 
             correct = correct_answers[i] if i < len(correct_answers) else []
+
+            # Основная картинка вопроса
+            main_image_path = self.get_image_for_question(original_num)
 
             questions.append({
                 'question': question_text,
@@ -177,8 +271,11 @@ class TestProgram:
                 'answer': correct,
                 'multiple': len(correct) > 1,
                 'original_index': original_num,
-                'has_image': has_image,
-                'image_path': image_path
+                'has_image': main_image_path is not None or len(question_images) > 0,
+                'image_path': main_image_path,
+                'image_as_question': image_as_question,
+                'image_as_answer': image_as_answer,
+                'question_images': question_images
             })
 
         return questions
@@ -199,6 +296,9 @@ class TestProgram:
 
         # Перемешиваем ответы внутри каждого вопроса
         for q in st.session_state.questions:
+            if q.get('image_as_answer', False):
+                continue  # Не перемешиваем варианты с картинками
+
             options_with_flags = []
             correct_answers = q['answer']
 
@@ -258,7 +358,16 @@ class TestProgram:
             **Форматы вопросов:**
             - ✅ Один правильный ответ
             - ✅ Несколько правильных ответов
+            - 🖼️ Вопросы с картинками
             """)
+
+            # Информация о папке с картинками
+            if os.path.exists(self.images_folder):
+                images_count = len([f for f in os.listdir(self.images_folder)
+                                    if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))])
+                st.info(f"📁 Папка с картинками: {self.images_folder} ({images_count} изображений)")
+            else:
+                st.warning("📁 Папка с картинками не найдена")
 
             # Загружаем вопросы
             success, message = self.load_all_files()
@@ -287,14 +396,15 @@ class TestProgram:
                     2. `ответы.txt` - варианты ответов
                     3. `правильные ответы.txt` - правильные ответы
 
-                    **Папка с картинками:** `картинки/` (опционально)
+                    **Папка с картинками:** `{self.images_folder}/` 
 
-                    **Как добавить файлы:**
-                    Эти файлы должны быть в одной папке с приложением на GitHub.
+                    **Формат картинок:**
+                    - Для вопроса №5: `5.png`, `5.jpg` и т.д.
+                    - Для вопроса с несколькими картинками: `144-1.png`, `144-2.png`
                     """)
 
     def render_question_page(self):
-        """Страница с вопросом"""
+        """Страница с вопросом с поддержкой картинок"""
         total = len(st.session_state.questions)
         current = st.session_state.current_question
         q = st.session_state.questions[current]
@@ -309,7 +419,6 @@ class TestProgram:
         with col_top2:
             st.metric("Правильных ответов", st.session_state.score)
         with col_top3:
-            # Кнопка досрочного завершения
             if st.button("🏁 Завершить", type="secondary", use_container_width=True):
                 self.finish_test_early()
 
@@ -320,11 +429,39 @@ class TestProgram:
         st.markdown(f"**Оригинальный номер вопроса:** {original_num}")
         st.markdown("---")
 
+        # Отображение картинок вопроса (для вопроса 144)
+        if q.get('image_as_question', False) and q.get('question_images'):
+            st.markdown("### 📷 Изображения к вопросу:")
+
+            # Создаем колонки для картинок
+            num_images = len(q['question_images'])
+            cols = st.columns(num_images)
+
+            for idx, (col, img_data) in enumerate(zip(cols, q['question_images'])):
+                with col:
+                    image = self.load_and_display_image(img_data['path'], max_width=400, max_height=300)
+                    if image:
+                        st.image(image, caption=f"Часть {img_data['part']}", use_container_width=True)
+                    else:
+                        st.warning(f"Не удалось загрузить часть {img_data['part']}")
+
+            st.markdown("---")
+
+        # Отображение основной картинки вопроса
+        elif q.get('has_image', False) and q.get('image_path'):
+            st.markdown("### 📷 Изображение к вопросу:")
+            image = self.load_and_display_image(q['image_path'], max_width=500, max_height=300)
+            if image:
+                st.image(image, use_container_width=True)
+            st.markdown("---")
+
         # Текст вопроса
         st.markdown(f"### {q['question']}")
 
         # Информация о типе вопроса
-        if q.get('multiple', False):
+        if q.get('image_as_answer', False):
+            st.info("🖼️ Выберите правильную картинку")
+        elif q.get('multiple', False):
             st.info("📌 Можно выбрать несколько вариантов")
         else:
             st.info("📌 Выберите один вариант")
@@ -332,28 +469,45 @@ class TestProgram:
         # Варианты ответов
         st.markdown("#### Варианты ответа:")
 
-        # Ключ для unique widget
-        widget_key = f"q_{current}"
+        if q.get('image_as_answer', False):
+            # Варианты ответов в виде картинок
+            num_options = len(q['options'])
+            cols = st.columns(num_options)
 
-        if q.get('multiple', False):
-            # Множественный выбор
-            options = q['options']
-            selected = st.multiselect(
-                "Выберите правильные ответы:",
-                options=options,
-                key=widget_key
-            )
-            st.session_state.answer = selected
+            for idx, (col, opt) in enumerate(zip(cols, q['options'])):
+                with col:
+                    if isinstance(opt, dict) and 'path' in opt:
+                        image = self.load_and_display_image(opt['path'], max_width=250, max_height=200)
+                        if image:
+                            st.image(image, caption=f"Вариант {opt['part']}", use_container_width=True)
+
+                            # Кнопка выбора варианта
+                            if st.button(f"Выбрать вариант {opt['part']}", key=f"img_opt_{current}_{idx}"):
+                                st.session_state.answer = chr(ord('A') + idx)
+                                self.save_answer(current, q)
+                                st.rerun()
+                        else:
+                            st.warning(f"Вариант {opt['part']} не загружен")
+
         else:
-            # Одиночный выбор
-            options = q['options']
-            selected = st.radio(
-                "Выберите правильный ответ:",
-                options=options,
-                key=widget_key,
-                index=None
-            )
-            st.session_state.answer = selected
+            # Текстовые варианты ответов
+            widget_key = f"q_{current}"
+
+            if q.get('multiple', False):
+                selected = st.multiselect(
+                    "Выберите правильные ответы:",
+                    options=q['options'],
+                    key=widget_key
+                )
+                st.session_state.answer = selected
+            else:
+                selected = st.radio(
+                    "Выберите правильный ответ:",
+                    options=q['options'],
+                    key=widget_key,
+                    index=None
+                )
+                st.session_state.answer = selected
 
         st.markdown("---")
 
@@ -363,33 +517,30 @@ class TestProgram:
         with col1:
             if current > 0:
                 if st.button("← Назад", use_container_width=True):
-                    # Сохраняем текущий ответ перед переходом
                     if st.session_state.answer:
                         self.save_answer(current, q)
                     st.session_state.current_question -= 1
                     st.session_state.rerun = True
 
         with col2:
-            # Пустое место для баланса
             st.empty()
 
         with col3:
             if current < total - 1:
                 if st.button("Далее →", type="primary", use_container_width=True):
-                    if st.session_state.answer:
+                    if st.session_state.answer and not q.get('image_as_answer', False):
                         self.save_answer(current, q)
                     st.session_state.current_question += 1
                     st.session_state.rerun = True
             else:
                 if st.button("Завершить тест", type="primary", use_container_width=True):
-                    if st.session_state.answer:
+                    if st.session_state.answer and not q.get('image_as_answer', False):
                         self.save_answer(current, q)
                     st.session_state.test_finished = True
                     st.session_state.test_started = False
                     st.session_state.rerun = True
 
         with col4:
-            # Дублируем кнопку завершения для удобства
             if st.button("🏁 Завершить сейчас", type="secondary", use_container_width=True):
                 self.finish_test_early()
 
@@ -400,33 +551,65 @@ class TestProgram:
         if not answer:
             return
 
-        # Проверяем, не был ли уже сохранен ответ на этот вопрос
-        # (чтобы избежать дублирования при возврате к вопросу)
-        if question_idx < len(st.session_state.user_answers):
-            # Если ответ уже был, обновляем его
-            st.session_state.user_answers[question_idx] = self.format_answer_for_save(answer, q)
-            st.session_state.user_answers_text[question_idx] = self.format_answer_for_display(answer, q)
+        # Для вопросов с картинками
+        if q.get('image_as_answer', False):
+            if isinstance(answer, str):
+                answer_idx = ord(answer) - ord('A')
+                if 0 <= answer_idx < len(q['options']):
+                    opt = q['options'][answer_idx]
+                    if isinstance(opt, dict):
+                        answer_text = f"Вариант {opt['part']}"
+                        answer_str = answer
+                    else:
+                        answer_text = answer
+                        answer_str = answer
+                else:
+                    return
+            else:
+                return
+        else:
+            # Для текстовых вопросов
+            if q.get('multiple', False):
+                answer_letters = []
+                answer_texts = []
+                for a in answer:
+                    idx = q['options'].index(a)
+                    answer_letters.append(chr(ord('A') + idx))
+                    answer_texts.append(a)
 
-            # Пересчитываем общий счет
+                answer_str = ','.join(sorted(answer_letters))
+                answer_text = '; '.join(answer_texts)
+            else:
+                if answer:
+                    idx = q['options'].index(answer)
+                    answer_str = chr(ord('A') + idx)
+                    answer_text = answer
+                else:
+                    return
+
+        # Сохраняем ответ
+        if question_idx < len(st.session_state.user_answers):
+            st.session_state.user_answers[question_idx] = answer_str
+            st.session_state.user_answers_text[question_idx] = answer_text
             self.recalculate_score()
         else:
-            # Если ответа еще не было, добавляем новый
-            answer_str = self.format_answer_for_save(answer, q)
-            answer_text = self.format_answer_for_display(answer, q)
-
             st.session_state.user_answers.append(answer_str)
             st.session_state.user_answers_text.append(answer_text)
 
             correct_str = ','.join(sorted(q['answer']))
 
-            # Получаем текст правильных ответов
             correct_texts = []
             for c in q['answer']:
                 idx = ord(c) - ord('A')
                 if 0 <= idx < len(q['options']):
-                    correct_texts.append(q['options'][idx])
+                    if q.get('image_as_answer', False):
+                        if idx < len(q['options']) and isinstance(q['options'][idx], dict):
+                            correct_texts.append(f"Вариант {q['options'][idx]['part']}")
+                        else:
+                            correct_texts.append(c)
+                    else:
+                        correct_texts.append(q['options'][idx])
 
-            # Добавляем правильные ответы в соответствующие списки
             while len(st.session_state.correct_answers) <= question_idx:
                 st.session_state.correct_answers.append('')
                 st.session_state.correct_answers_text.append('')
@@ -434,37 +617,19 @@ class TestProgram:
             st.session_state.correct_answers[question_idx] = correct_str
             st.session_state.correct_answers_text[question_idx] = '; '.join(correct_texts)
 
-            # Проверяем правильность и обновляем счет
             if self.check_answer_correctness(answer, q):
                 st.session_state.score += 1
-
-    def format_answer_for_save(self, answer, q):
-        """Форматирует ответ для сохранения"""
-        if q.get('multiple', False):
-            answer_letters = []
-            for a in answer:
-                idx = q['options'].index(a)
-                answer_letters.append(chr(ord('A') + idx))
-            return ','.join(sorted(answer_letters))
-        else:
-            if answer:
-                idx = q['options'].index(answer)
-                return chr(ord('A') + idx)
-            return ''
-
-    def format_answer_for_display(self, answer, q):
-        """Форматирует ответ для отображения"""
-        if q.get('multiple', False):
-            return '; '.join(answer)
-        else:
-            return answer if answer else ''
 
     def check_answer_correctness(self, answer, q):
         """Проверяет правильность ответа"""
         if not answer:
             return False
 
-        if q.get('multiple', False):
+        if q.get('image_as_answer', False):
+            if isinstance(answer, str):
+                return answer in q['answer']
+            return False
+        elif q.get('multiple', False):
             answer_letters = []
             for a in answer:
                 idx = q['options'].index(a)
@@ -496,7 +661,6 @@ class TestProgram:
         """Страница с результатами"""
         st.title("📊 Результаты теста")
 
-        # Информация о досрочном завершении
         if st.session_state.get('test_completed_early', False):
             st.info("🏁 Тест завершен досрочно")
 
@@ -507,7 +671,6 @@ class TestProgram:
         score = st.session_state.score
         percent = (score / total) * 100 if total > 0 else 0
 
-        # Основная статистика
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("Всего вопросов", total)
@@ -518,7 +681,6 @@ class TestProgram:
         with col4:
             st.metric("Процент", f"{percent:.1f}%")
 
-        # Оценка
         col1, col2, col3 = st.columns(3)
         with col2:
             if percent >= 90:
@@ -538,11 +700,9 @@ class TestProgram:
 
         st.markdown("---")
 
-        # Детальный разбор ответов
         if answered > 0:
             st.markdown("### 📋 Детализация ответов")
 
-            # Создаем DataFrame для удобного отображения
             results_data = []
             for i in range(total):
                 original_idx = st.session_state.question_mapping.get(i, i)
@@ -570,7 +730,6 @@ class TestProgram:
             df = pd.DataFrame(results_data)
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-            # Вопросы с ошибками
             mistakes = [r for r in results_data if r["Результат"] == "❌"]
             if mistakes:
                 st.markdown("### ❌ Вопросы с ошибками")
@@ -587,11 +746,9 @@ class TestProgram:
 
         st.markdown("---")
 
-        # Кнопка для нового теста
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             if st.button("🔄 Пройти тест заново", type="primary", use_container_width=True):
-                # Сброс состояния
                 st.session_state.test_started = True
                 st.session_state.test_finished = False
                 st.session_state.test_completed_early = False
@@ -603,18 +760,14 @@ class TestProgram:
                 st.session_state.correct_answers_text = []
                 st.session_state.saved_answers = {}
                 st.session_state.rerun = True
-
-                # Перемешиваем заново
                 self.shuffle_all()
 
     def run(self):
         """Запуск приложения"""
-        # Принудительный rerun при необходимости
         if st.session_state.get('rerun', False):
             st.session_state.rerun = False
             st.rerun()
 
-        # Отображение соответствующей страницы
         if not st.session_state.test_started and not st.session_state.test_finished:
             self.render_start_page()
         elif st.session_state.test_started:
